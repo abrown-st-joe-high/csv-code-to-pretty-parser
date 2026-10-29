@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Python Indent Fixer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f2f4f6; --panel: #ffffff; --ink: #1a2330; --muted: #5d6b7b;
+    --line: #d3dae2; --accent: #0f5fd6; --accent-ink: #ffffff; --code-bg: #fbfcfd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12171d; --panel: #1a212a; --ink: #e6ebf1; --muted: #93a1b1;
+      --line: #2f3a47; --accent: #5b9bff; --accent-ink: #0c1118; --code-bg: #10161c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  h2 { font-size: 1.05rem; margin: 0 0 8px; }
+  textarea {
+    width: 100%; min-height: 240px; resize: vertical; padding: 12px;
+    font: 14px/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    color: var(--ink); background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    tab-size: 4; white-space: pre; overflow: auto;
+  }
+  textarea:focus, button:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-top: 12px; }
+  button {
+    font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: .95rem; }
+  select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  .status { color: var(--muted); font-size: .9rem; min-height: 1.4em; }
+  .hint { color: var(--muted); font-size: .9rem; margin: 6px 0 0; }
+  #pages { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; }
+  .page {
+    position: relative; width: 264px; height: 204px; background: #fff; color: #000;
+    border: 1px solid var(--line); box-shadow: 0 1px 3px rgba(0,0,0,.18);
+    display: flex; align-items: center; justify-content: flex-start; overflow: hidden;
+  }
+  .page pre { margin: 0 0 0 24px; font-family: "Courier New", Courier, monospace; white-space: pre; }
+  .page .num { position: absolute; right: 6px; bottom: 4px; font: 10px system-ui, sans-serif; color: #666; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Python Indent Fixer</h1>
+  <p class="sub">Paste Python code that lost its spacing. Fix the indentation, adjust anything that's off, then copy it or print one line per page.</p>
+
+  <section class="panel">
+    <h2>1. Paste code</h2>
+    <textarea id="input" spellcheck="false" placeholder="Paste Python code here (indentation can be missing)"></textarea>
+    <p class="hint">Splitting: two or more spaces, or a tab, start a new line. After a colon the next line is indented. A smaller gap than the one that opened a block moves the code back out.</p>
+    <div class="row">
+      <button class="primary" id="fixBtn">Fix indentation</button>
+      <label>Indent with
+        <select id="indentType">
+          <option value="4">4 spaces</option>
+          <option value="2">2 spaces</option>
+          <option value="tab">Tab</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="splitMode"> Code is all on one line (split it into lines)</label>
+      <label><input type="checkbox" id="blankReset"> A blank line ends a function (back to the left margin)</label>
+      <button id="clearBtn">Clear</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>2. Check and edit</h2>
+    <textarea id="output" spellcheck="false" placeholder="Fixed code appears here. You can edit it."></textarea>
+    <p class="hint">Tab indents the selected lines. Shift+Tab outdents them. The tool can't know where every block ends, so check the spots where code moves back to the left.</p>
+    <div class="row">
+      <button id="copyBtn">Copy code</button>
+      <span class="status" id="status" role="status"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>3. One line per page (PDF)</h2>
+    <div class="row" style="margin-top:0">
+      <label>Page
+        <select id="orient">
+          <option value="landscape">Landscape</option>
+          <option value="portrait">Portrait</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="numbers"> Print line number on each page</label>
+    </div>
+    <div class="row">
+      <button class="primary" id="previewBtn">Generate preview</button>
+      <button id="pdfBtn" disabled>Download PDF</button>
+      <span class="status" id="pdfStatus" role="status"></span>
+    </div>
+    <div id="pages"></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const ELSE_FAMILY = new Set(['elif', 'else', 'except', 'finally']);
+  const ENDS_BLOCK = new Set(['return', 'break', 'continue', 'raise', 'pass']);
+  const BLOCK_KW = new Set(['if', 'elif', 'else', 'for', 'while', 'def', 'class', 'try', 'except', 'finally', 'with', 'async', 'match', 'case']);
+  const NOBREAK = new Set(['and', 'or', 'in', 'is', 'not', 'as', 'lambda']);
+  const STATEMENT_KW = new Set(['elif', 'for', 'while', 'def', 'class', 'try', 'except', 'finally', 'with', 'return', 'break', 'continue', 'pass', 'raise', 'del', 'global', 'nonlocal', 'assert', 'async']);
+  // a name that needs something after it, so no new statement can start right behind it
+  const CONT_KW = new Set(['return', 'import', 'from', 'in', 'is', 'and', 'or', 'not', 'del', 'assert', 'raise', 'global', 'nonlocal', 'yield', 'await', 'lambda', 'else', 'elif', 'if', 'while', 'for', 'with', 'as', 'class', 'def', 'try', 'except', 'finally', 'async']);
+
+  // Walks one line, tracking brackets and triple quotes. Returns the last code character.
+  function scan(s, st) {
+    let last = '', i = 0;
+    while (i < s.length) {
+      if (st.triple) {
+        const j = s.indexOf(st.triple, i);
+        if (j < 0) return last;
+        i = j + 3; st.triple = null; last = '"';
+        continue;
+      }
+      const c = s[i];
+      if (c === '#') break;
+      if (c === '"' || c === "'") {
+        const tri = c.repeat(3);
+        if (s.startsWith(tri, i)) { st.triple = tri; i += 3; last = '"'; continue; }
+        let j = i + 1;
+        while (j < s.length && s[j] !== c) { if (s[j] === '\\') j++; j++; }
+        i = j + 1; last = '"';
+        continue;
+      }
+      if ('([{'.includes(c)) st.depth++;
+      else if (')]}'.includes(c)) st.depth = Math.max(0, st.depth - 1);
+      if (!/\s/.test(c)) last = c;
+      i++;
+    }
+    return last;
+  }
+
+  function firstWord(t) {
+    if (t[0] === '@') return '@';
+    const m = t.match(/^(?:async\s+)?([A-Za-z_]+)/);
+    return m ? m[1] : '';
+  }
+
+  function reindent(src, unit, blankReset, gaps) {
+    const lines = src.replace(/\r\n?/g, '\n').split('\n');
+    const out = [];
+    let pending = [], stack = [], level = 0, dedentNext = false, resetNext = false, prevBlank = true, awaitBody = false;
+    const st = { depth: 0, triple: null, tripleLevel: 0, cur: { kw: '', level: 0 } };
+
+    const popTo = lvl => { while (stack.length && stack[stack.length - 1].level >= lvl) stack.pop(); };
+    const lastIdx = pred => { for (let i = stack.length - 1; i >= 0; i--) if (pred(stack[i])) return i; return -1; };
+    const finish = last => {
+      if (st.triple || st.depth > 0) return;
+      if (last === ':') {
+        stack.push({ kw: st.cur.kw, level: st.cur.level });
+        level = st.cur.level + 1; dedentNext = false; awaitBody = true;
+      } else {
+        level = st.cur.level; dedentNext = ENDS_BLOCK.has(st.cur.kw);
+      }
+    };
+
+    for (let li = 0; li < lines.length; li++) {
+      const raw = lines[li];
+      const t = raw.replace(/\u00a0/g, ' ').trim();
+
+      if (st.triple) {                       // inside a docstring or multi-line string
+        const last = scan(t, st);
+        out.push({ t, level: st.tripleLevel });
+        if (!st.triple) { dedentNext = false; finish(last); }
+        continue;
+      }
+      if (t === '') {
+        out.push({ t: '', level: 0 });
+        if (!prevBlank && blankReset && st.depth === 0) resetNext = true;
+        prevBlank = true;
+        continue;
+      }
+      prevBlank = false;
+
+      if (t[0] === '#' && st.depth === 0) {  // comments take the level of the next code line
+        const e = { t, level: level };
+        out.push(e); pending.push(e);
+        continue;
+      }
+
+      let lvl;
+      const cont = st.depth > 0;
+      if (cont) {
+        lvl = st.cur.level + (/^[)\]}]/.test(t) ? 0 : 1);
+      } else {
+        const kw = firstWord(t);
+        if (resetNext && !ELSE_FAMILY.has(kw)) { stack.length = 0; level = 0; }
+        resetNext = false;
+        if (ELSE_FAMILY.has(kw)) {
+          const allowed = (kw === 'except' || kw === 'finally')
+            ? ['try', 'except', 'else'] : ['if', 'elif', 'for', 'while', 'try', 'except'];
+          const idx = lastIdx(s => allowed.includes(s.kw));
+          if (idx >= 0) { lvl = stack[idx].level; stack.length = idx; }
+          else { lvl = Math.max(level - 1, 0); popTo(lvl); }
+        } else if (kw === 'class') {
+          lvl = 0; stack.length = 0;
+        } else if (kw === 'def' || kw === '@') {
+          const ci = lastIdx(s => s.kw === 'class');
+          if (ci >= 0) { lvl = stack[ci].level + 1; stack.length = ci + 1; }
+          else { lvl = 0; stack.length = 0; }
+        } else if (/^if\s+__name__\b/.test(t)) {
+          lvl = 0; stack.length = 0;
+        } else {
+          lvl = level;
+          if (dedentNext) { lvl = Math.max(level - 1, 0); popTo(lvl); }
+          // a gap smaller than the one that started a block means the block ended
+          const g = gaps ? gaps[li] : undefined;
+          if (g !== undefined) {
+            while (stack.length && stack[stack.length - 1].bodyGap !== undefined && g < stack[stack.length - 1].bodyGap) {
+              lvl = Math.min(lvl, stack.pop().level);
+            }
+          }
+        }
+        dedentNext = false;
+        if (awaitBody) {
+          const top = stack[stack.length - 1];
+          if (top && top.level === lvl - 1) top.bodyGap = gaps ? gaps[li] : undefined;
+          awaitBody = false;
+        }
+        st.cur = { kw, level: lvl };
+        level = lvl;
+      }
+
+      pending.forEach(e => { e.level = lvl; });
+      pending = [];
+      st.tripleLevel = lvl;
+      const last = scan(t, st);
+      out.push({ t, level: lvl });
+      finish(last);
+    }
+    const pad = unit === 'tab' ? '\t' : ' '.repeat(+unit);
+    return out.map(o => o.t === '' ? '' : pad.repeat(o.level) + o.t).join('\n');
+  }
+
+  // ---- Split code that is all on one line ----
+  // Two or more spaces (or a tab) mark a new line. A single space also starts a new
+  // line when a statement clearly ends and another begins, e.g. print("a") print("b").
+  // Returns segments with the width of the whitespace that came before each one.
+  function splitLine(s, st) {
+    const out = [], n = s.length;
+    let cur = '', kw = '', depth = 0, lam = 0, last = '', lastWord = '', gap, i = 0;
+    const flush = g => {
+      if (cur.trim() !== '') out.push({ text: cur.trim(), gap });
+      cur = ''; kw = ''; depth = 0; lam = 0; last = ''; lastWord = ''; gap = g;
+    };
+    const shouldBreak = (w, tab, rest) => {
+      const canEnd = last === 'end' || (last === 'name' && !CONT_KW.has(lastWord));
+      if (!canEnd) return false;
+      const strong = w >= 2 || tab;
+      if (/^@\w/.test(rest)) return true;
+      const m = rest.match(/^[A-Za-z_]\w*/);
+      if (!m) return false;
+      const word = m[0], after = rest.slice(word.length);
+      if (NOBREAK.has(word)) return false;
+      if (word === 'from') return /^from\s+[\w.]+\s+import\b/.test(rest);
+      if (word === 'import') return kw !== 'from';
+      if (word === 'if') return !/\belse\b/.test(rest.split(':')[0]);
+      if (word === 'else') return /^\s*:/.test(after);
+      if (STATEMENT_KW.has(word)) return true;
+      if (last === 'end' || strong) return true;
+      return /^\s*(\(|\.|=(?!=)|[-+*\/%&|^]=)/.test(after);
+    };
+    while (i < n && /\s/.test(s[i])) i++;
+    while (i < n) {
+      const c = s[i];
+      if (/\s/.test(c)) {
+        let j = i, w = 0, tab = false;
+        while (j < n && /\s/.test(s[j])) { if (s[j] === '\t') { w += 4; tab = true; } else w++; j++; }
+        if (j >= n) break;
+        if (depth === 0 && cur !== '' && shouldBreak(w, tab, s.slice(j))) { flush(w); i = j; continue; }
+        cur += s.slice(i, j); i = j; continue;
+      }
+      if (c === '#') { cur += s.slice(i); break; }
+      if (c === '"' || c === "'") {
+        const tri = c.repeat(3);
+        if (s.startsWith(tri, i)) {
+          const j = s.indexOf(tri, i + 3);
+          last = 'end';
+          if (j < 0) { cur += s.slice(i); st.triple = tri; break; }
+          cur += s.slice(i, j + 3); i = j + 3; continue;
+        }
+        let j = i + 1;
+        while (j < n && s[j] !== c) { if (s[j] === '\\') j++; j++; }
+        cur += s.slice(i, j + 1); i = j + 1; last = 'end';
+        continue;
+      }
+      if (/[A-Za-z_]/.test(c)) {
+        const word = s.slice(i).match(/^[A-Za-z_]\w*/)[0];
+        if (cur.trim() === '' || cur.trim() === 'async') kw = word;
+        if (word === 'lambda' && depth === 0) lam++;
+        cur += word; i += word.length; last = 'name'; lastWord = word;
+        continue;
+      }
+      if (/\d/.test(c)) {
+        const num = s.slice(i).match(/^\d[\w.]*/)[0];
+        cur += num; i += num.length; last = 'end';
+        continue;
+      }
+      if ('([{'.includes(c)) { depth++; cur += c; i++; last = 'op'; continue; }
+      if (')]}'.includes(c)) { depth = Math.max(0, depth - 1); cur += c; i++; last = 'end'; continue; }
+      if (c === ':' && depth === 0) {
+        cur += c; i++; last = 'op';
+        if (lam > 0) { lam--; continue; }
+        if (BLOCK_KW.has(kw)) {
+          let j = i, w = 0;
+          while (j < n && /\s/.test(s[j])) { w += s[j] === '\t' ? 4 : 1; j++; }
+          if (j >= n) break;
+          if (s[j] === '#') continue;
+          flush(w); i = j; continue;
+        }
+        continue;
+      }
+      cur += c; i++; last = 'op';
+    }
+    flush();
+    return out;
+  }
+
+  function splitBlob(src) {
+    const lines = [], gaps = [], st = { triple: null };
+    for (const phys of src.replace(/\r\n?/g, '\n').split('\n')) {
+      if (st.triple) {
+        lines.push(phys.trim()); gaps.push(undefined);
+        if (phys.includes(st.triple)) st.triple = null;
+        continue;
+      }
+      const segs = splitLine(phys, st);
+      if (!segs.length) { lines.push(''); gaps.push(undefined); continue; }
+      segs.forEach(sg => { lines.push(sg.text); gaps.push(sg.gap); });
+    }
+    return { lines, gaps };
+  }
+
+  // ---- Fix / copy / clear ----
+  const status = $('status');
+  function say(msg) { status.textContent = msg; }
+
+  $('fixBtn').addEventListener('click', () => {
+    const src = $('input').value;
+    if (!src.trim()) { say('Paste some code first.'); return; }
+    let text = src, gaps;
+    if ($('splitMode').checked) {
+      const r = splitBlob(src);
+      text = r.lines.join('\n'); gaps = r.gaps;
+    }
+    $('output').value = reindent(text, $('indentType').value, $('blankReset').checked, gaps);
+    say('Indentation fixed. Edit anything that looks off.');
+    $('output').focus();
+  });
+
+  $('clearBtn').addEventListener('click', () => {
+    $('input').value = ''; $('output').value = ''; $('pages').innerHTML = '';
+    $('pdfBtn').disabled = true; say(''); $('pdfStatus').textContent = '';
+  });
+
+  $('copyBtn').addEventListener('click', async () => {
+    const ta = $('output');
+    if (!ta.value) { say('Nothing to copy yet.'); return; }
+    try { await navigator.clipboard.writeText(ta.value); }
+    catch (e) { ta.select(); document.execCommand('copy'); }
+    say('Copied to clipboard.');
+  });
+
+  // ---- Tab / Shift+Tab in the editor ----
+  $('output').addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    e.preventDefault();
+    const ta = e.target, v = ta.value;
+    const type = $('indentType').value;
+    const pad = type === 'tab' ? '\t' : ' '.repeat(+type);
+    let s = ta.selectionStart, en = ta.selectionEnd;
+    const multi = v.slice(s, en).includes('\n');
+    if (!e.shiftKey && !multi) {
+      ta.setRangeText(pad, s, en, 'end');
+      return;
+    }
+    const start = v.lastIndexOf('\n', s - 1) + 1;
+    let end = v.indexOf('\n', en); if (end < 0) end = v.length;
+    const block = v.slice(start, end).split('\n').map(line => {
+      if (!e.shiftKey) return line === '' ? line : pad + line;
+      if (line.startsWith('\t')) return line.slice(1);
+      const m = line.match(/^ +/);
+      return m ? line.slice(Math.min(m[0].length, type === 'tab' ? 4 : +type)) : line;
+    }).join('\n');
+    ta.setRangeText(block, start, end, 'select');
+  });
+
+  // ---- PDF preview and download ----
+  function getLines() {
+    return $('output').value.split('\n')
+      .map(l => l.replace(/\s+$/, '').replace(/\t/g, '    '))
+      .filter(l => l.trim() !== '');
+  }
+  function pageSize() {
+    return $('orient').value === 'landscape' ? { w: 792, h: 612 } : { w: 612, h: 792 };
+  }
+  function fontFor(line, w) {
+    const usable = w - 72;
+    return Math.max(8, Math.min(36, usable / (0.6 * Math.max(line.length, 1))));
+  }
+
+  $('previewBtn').addEventListener('click', () => {
+    const lines = getLines(), box = $('pages'), info = $('pdfStatus');
+    box.innerHTML = '';
+    if (!lines.length) { info.textContent = 'Add code in step 2 first.'; $('pdfBtn').disabled = true; return; }
+    const { w, h } = pageSize();
+    const cardW = 264, scale = cardW / w, cardH = h * scale;
+    lines.forEach((line, i) => {
+      const card = document.createElement('div');
+      card.className = 'page';
+      card.style.width = cardW + 'px'; card.style.height = cardH + 'px';
+      const pre = document.createElement('pre');
+      pre.style.fontSize = (fontFor(line, w) * scale) + 'px';
+      pre.style.marginLeft = (36 * scale) + 'px';
+      pre.textContent = line;
+      card.appendChild(pre);
+      if ($('numbers').checked) {
+        const n = document.createElement('span');
+        n.className = 'num'; n.textContent = (i + 1) + ' / ' + lines.length;
+        card.appendChild(n);
+      }
+      box.appendChild(card);
+    });
+    info.textContent = lines.length + ' page' + (lines.length === 1 ? '' : 's') + ' (blank lines are skipped).';
+    $('pdfBtn').disabled = false;
+  });
+
+  $('pdfBtn').addEventListener('click', () => {
+    const lines = getLines(), info = $('pdfStatus');
+    if (!lines.length) return;
+    if (!window.jspdf) { info.textContent = 'The PDF library did not load. Check your internet connection and reload.'; return; }
+    const { w, h } = pageSize();
+    const doc = new window.jspdf.jsPDF({ orientation: $('orient').value, unit: 'pt', format: 'letter' });
+    doc.setFont('courier', 'normal');
+    lines.forEach((line, i) => {
+      if (i > 0) doc.addPage();
+      const fs = fontFor(line, w);
+      doc.setFontSize(fs);
+      doc.text(line, 36, h / 2 + fs * 0.3);
+      if ($('numbers').checked) {
+        doc.setFontSize(10);
+        doc.text((i + 1) + ' / ' + lines.length, w - 36, h - 24, { align: 'right' });
+      }
+    });
+    doc.save('python-lines.pdf');
+    info.textContent = 'PDF downloaded.';
+  });
+})();
+</script>
+</body>
+</html>
