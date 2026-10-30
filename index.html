@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Python Indent Fixer</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   :root {
     --bg: #f2f4f6; --panel: #ffffff; --ink: #1a2330; --muted: #5d6b7b;
@@ -57,9 +58,15 @@
   <p class="sub">Paste Python code that lost its spacing. Fix the indentation, adjust anything that's off, then copy it or print one line per page.</p>
 
   <section class="panel">
-    <h2>1. Paste code</h2>
-    <textarea id="input" spellcheck="false" placeholder="Paste Python code here (indentation can be missing)"></textarea>
-    <p class="hint">Splitting: two or more spaces, or a tab, start a new line. After a colon the next line is indented. A smaller gap than the one that opened a block moves the code back out.</p>
+    <h2>1. Paste code or load a CSV</h2>
+    <textarea id="input" spellcheck="false" placeholder="Paste Python code here (indentation can be missing). A ~ marks the end of each program."></textarea>
+    <div class="row">
+      <label>CSV file <input type="file" id="csvFile" accept=".csv,text/csv,.txt"></label>
+      <label id="colWrap" hidden>Code column
+        <select id="colSel"></select>
+      </label>
+    </div>
+    <p class="hint">A <code>~</code> ends a program, so one paste can hold many. Splitting: two or more spaces, or a tab, start a new line. After a colon the next line is indented. A smaller gap than the one that opened a block moves the code back out, and a bigger gap than the block's first line makes a nested block.</p>
     <div class="row">
       <button class="primary" id="fixBtn">Fix indentation</button>
       <label>Indent with
@@ -70,6 +77,7 @@
         </select>
       </label>
       <label><input type="checkbox" id="splitMode"> Code is all on one line (split it into lines)</label>
+      <label><input type="checkbox" id="oneStmt" checked> An if/elif/else body is one statement unless wide spacing shows more</label>
       <label><input type="checkbox" id="blankReset"> A blank line ends a function (back to the left margin)</label>
       <button id="clearBtn">Clear</button>
     </div>
@@ -78,7 +86,7 @@
   <section class="panel">
     <h2>2. Check and edit</h2>
     <textarea id="output" spellcheck="false" placeholder="Fixed code appears here. You can edit it."></textarea>
-    <p class="hint">Tab indents the selected lines. Shift+Tab outdents them. The tool can't know where every block ends, so check the spots where code moves back to the left.</p>
+    <p class="hint">A line with only <code>~</code> separates programs. Tab indents the selected lines. Shift+Tab outdents them. The tool can't know where every block ends, so check the spots where code moves back to the left.</p>
     <div class="row">
       <button id="copyBtn">Copy code</button>
       <span class="status" id="status" role="status"></span>
@@ -86,21 +94,44 @@
   </section>
 
   <section class="panel">
-    <h2>3. One line per page (PDF)</h2>
+    <h2>3. Preview and download</h2>
     <div class="row" style="margin-top:0">
+      <label>Pages
+        <select id="layout">
+          <option value="program">One page per program</option>
+          <option value="line">One line per page</option>
+        </select>
+      </label>
       <label>Page
         <select id="orient">
           <option value="landscape">Landscape</option>
           <option value="portrait">Portrait</option>
         </select>
       </label>
-      <label><input type="checkbox" id="numbers"> Print line number on each page</label>
+      <label><input type="checkbox" id="numbers"> Print a number on each page</label>
     </div>
     <div class="row">
+      <label>Lines longer than <input type="number" id="maxLen" value="60" min="20" max="200" style="width:4.5em"> characters:
+        <select id="longMode">
+          <option value="shrink">Make the font smaller</option>
+          <option value="wrap">Line break and indent (for reading only)</option>
+          <option value="backslash">Backslash continuation</option>
+        </select>
+      </label>
+      <label>Blank-line marker <input type="text" id="marker" value="`" maxlength="1" style="width:2.5em;text-align:center;font-family:monospace"></label>
+    </div>
+    <p class="hint">Put the marker at the very end of a line to add one extra blank line after it in the PDF. The marker is never printed, and Copy code leaves it out. Clear the box to turn this off.</p>
+    <div class="row">
       <button class="primary" id="previewBtn">Generate preview</button>
-      <button id="pdfBtn" disabled>Download PDF</button>
       <span class="status" id="pdfStatus" role="status"></span>
     </div>
+    <div class="row">
+      <button id="pdfBtn">Download PDF</button>
+      <button id="docxBtn">Download DOCX</button>
+      <button id="csvBtn">Download CSV</button>
+      <button id="zipBtn" class="primary">Download ZIP (all three)</button>
+    </div>
+    <p class="hint">The CSV has one program per row, with line breaks and indentation kept inside the cell and blank-line markers removed. You can load it back in with the CSV picker in step 1.</p>
     <div id="pages"></div>
   </section>
 </main>
@@ -150,7 +181,7 @@
     return m ? m[1] : '';
   }
 
-  function reindent(src, unit, blankReset, gaps) {
+  function reindent(src, unit, blankReset, gaps, selfContained, marker) {
     const lines = src.replace(/\r\n?/g, '\n').split('\n');
     const out = [];
     let pending = [], stack = [], level = 0, dedentNext = false, resetNext = false, prevBlank = true, awaitBody = false;
@@ -170,7 +201,7 @@
 
     for (let li = 0; li < lines.length; li++) {
       const raw = lines[li];
-      const t = raw.replace(/\u00a0/g, ' ').trim();
+      let t = raw.replace(/\u00a0/g, ' ').trim();
 
       if (st.triple) {                       // inside a docstring or multi-line string
         const last = scan(t, st);
@@ -191,6 +222,9 @@
         out.push(e); pending.push(e);
         continue;
       }
+
+      let mk = '';   // a blank-line marker at the end of the line is kept, but ignored here
+      if (marker && t.length > marker.length && t.endsWith(marker)) { t = t.slice(0, -marker.length).trimEnd(); mk = marker; }
 
       let lvl;
       const cont = st.depth > 0;
@@ -217,6 +251,8 @@
         } else {
           lvl = level;
           if (dedentNext) { lvl = Math.max(level - 1, 0); popTo(lvl); }
+          // an if/elif/else body that spacing says nothing about is a single statement
+          while (stack.length && stack[stack.length - 1].closeAfter) lvl = Math.min(lvl, stack.pop().level);
           // a gap smaller than the one that started a block means the block ended
           const g = gaps ? gaps[li] : undefined;
           if (g !== undefined) {
@@ -228,7 +264,11 @@
         dedentNext = false;
         if (awaitBody) {
           const top = stack[stack.length - 1];
-          if (top && top.level === lvl - 1) top.bodyGap = gaps ? gaps[li] : undefined;
+          if (top && top.level === lvl - 1) {
+            const g0 = gaps ? gaps[li] : undefined;
+            top.bodyGap = g0;
+            if (selfContained && g0 !== undefined && g0 < 2 && (top.kw === 'if' || top.kw === 'elif' || top.kw === 'else')) top.closeAfter = true;
+          }
           awaitBody = false;
         }
         st.cur = { kw, level: lvl };
@@ -239,7 +279,7 @@
       pending = [];
       st.tripleLevel = lvl;
       const last = scan(t, st);
-      out.push({ t, level: lvl });
+      out.push({ t: t + mk, level: lvl });
       finish(last);
     }
     const pad = unit === 'tab' ? '\t' : ' '.repeat(+unit);
@@ -250,7 +290,7 @@
   // Two or more spaces (or a tab) mark a new line. A single space also starts a new
   // line when a statement clearly ends and another begins, e.g. print("a") print("b").
   // Returns segments with the width of the whitespace that came before each one.
-  function splitLine(s, st) {
+  function splitLine(s, st, marker) {
     const out = [], n = s.length;
     let cur = '', kw = '', depth = 0, lam = 0, last = '', lastWord = '', gap, i = 0;
     const flush = g => {
@@ -284,6 +324,7 @@
         if (depth === 0 && cur !== '' && shouldBreak(w, tab, s.slice(j))) { flush(w); i = j; continue; }
         cur += s.slice(i, j); i = j; continue;
       }
+      if (marker && c === marker && depth === 0) { cur += c; i++; continue; }
       if (c === '#') { cur += s.slice(i); break; }
       if (c === '"' || c === "'") {
         const tri = c.repeat(3);
@@ -315,6 +356,7 @@
       if (c === ':' && depth === 0) {
         cur += c; i++; last = 'op';
         if (lam > 0) { lam--; continue; }
+        if (marker && s[i] === marker) { cur += marker; i++; }
         if (BLOCK_KW.has(kw)) {
           let j = i, w = 0;
           while (j < n && /\s/.test(s[j])) { w += s[j] === '\t' ? 4 : 1; j++; }
@@ -330,7 +372,7 @@
     return out;
   }
 
-  function splitBlob(src) {
+  function splitBlob(src, marker) {
     const lines = [], gaps = [], st = { triple: null };
     for (const phys of src.replace(/\r\n?/g, '\n').split('\n')) {
       if (st.triple) {
@@ -338,41 +380,131 @@
         if (phys.includes(st.triple)) st.triple = null;
         continue;
       }
-      const segs = splitLine(phys, st);
+      const segs = splitLine(phys, st, marker);
       if (!segs.length) { lines.push(''); gaps.push(undefined); continue; }
       segs.forEach(sg => { lines.push(sg.text); gaps.push(sg.gap); });
     }
     return { lines, gaps };
   }
 
+  // ---- Programs separated by ~ (one per spreadsheet cell) ----
+  function splitPrograms(text) {
+    const parts = text.replace(/\r\n?/g, '\n').split('~'), out = [];
+    parts.forEach((part, i) => {
+      let s = part.replace(/^\s+/, ''), quoted = false;
+      if (i === 0) { if (s[0] === '"') { s = s.slice(1); quoted = true; } }
+      else if (s[0] === '"') {           // closing quote of the previous cell, maybe an opening quote
+        s = s.slice(1).replace(/^\s+/, '');
+        if (s[0] === '"') { s = s.slice(1); quoted = true; }
+      }
+      if (quoted) s = s.replace(/""/g, '"');   // undo spreadsheet quote doubling
+      s = s.trim();
+      if (s) out.push(s);
+    });
+    return out;
+  }
+
+  function parseCSV(t) {
+    t = t.replace(/^\uFEFF/, '');
+    const rows = []; let row = [], f = '', q = false;
+    for (let i = 0; i < t.length; i++) {
+      const c = t[i];
+      if (q) {
+        if (c === '"') { if (t[i + 1] === '"') { f += '"'; i++; } else q = false; }
+        else f += c;
+      } else if (c === '"') q = true;
+      else if (c === ',') { row.push(f); f = ''; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && t[i + 1] === '\n') i++;
+        row.push(f); rows.push(row); row = []; f = '';
+      } else f += c;
+    }
+    if (f !== '' || row.length) { row.push(f); rows.push(row); }
+    return rows;
+  }
+
   // ---- Fix / copy / clear ----
   const status = $('status');
+  const getMarker = () => $('marker').value.slice(0, 1);
+  const stripMarkers = text => {
+    const m = getMarker();
+    if (!m) return text;
+    return text.split('\n').map(l => { const r = l.replace(/\s+$/, ''); return r.endsWith(m) ? r.slice(0, -m.length).replace(/\s+$/, '') : l; }).join('\n');
+  };
   function say(msg) { status.textContent = msg; }
 
   $('fixBtn').addEventListener('click', () => {
     const src = $('input').value;
     if (!src.trim()) { say('Paste some code first.'); return; }
-    let text = src, gaps;
-    if ($('splitMode').checked) {
-      const r = splitBlob(src);
-      text = r.lines.join('\n'); gaps = r.gaps;
-    }
-    $('output').value = reindent(text, $('indentType').value, $('blankReset').checked, gaps);
-    say('Indentation fixed. Edit anything that looks off.');
+    const progs = splitPrograms(src);
+    if (!progs.length) { say('No code found.'); return; }
+    const outs = progs.map(p => {
+      let text = p, gaps;
+      if ($('splitMode').checked) {
+        const r = splitBlob(p, getMarker());
+        text = r.lines.join('\n'); gaps = r.gaps;
+      }
+      return reindent(text, $('indentType').value, $('blankReset').checked, gaps, $('oneStmt').checked, getMarker());
+    });
+    $('output').value = outs.join('\n~\n');
+    const many = outs.length > 1;
+    $('layout').value = many ? 'program' : 'line';
+    $('numbers').checked = many;
+    $('pages').innerHTML = ''; $('pdfStatus').textContent = '';
+    say(many ? outs.length + ' programs fixed. A line with only ~ separates them.' : 'Indentation fixed. Edit anything that looks off.');
     $('output').focus();
   });
 
+  let csvRows = [];
+  function loadColumn() {
+    const col = +$('colSel').value;
+    const cells = csvRows.slice(1).map(r => (r[col] || '').trim()).filter(Boolean)
+      .map(c => c.endsWith('~') ? c : c + '~');
+    $('input').value = cells.join('\n');
+    say(cells.length + ' program' + (cells.length === 1 ? '' : 's') + ' loaded from the CSV. Click Fix indentation.');
+  }
+  $('csvFile').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const rd = new FileReader();
+    rd.onload = () => {
+      csvRows = parseCSV(String(rd.result));
+      if (csvRows.length < 2) { say('That CSV has no data rows.'); return; }
+      const sel = $('colSel');
+      sel.innerHTML = '';
+      let best = 0, bestScore = -1;
+      csvRows[0].forEach((name, i) => {
+        const o = document.createElement('option');
+        o.value = i; o.textContent = name || ('Column ' + (i + 1));
+        sel.appendChild(o);
+        const score = csvRows.slice(1).filter(r => (r[i] || '').includes('~')).length * 1e6
+          + csvRows.slice(1).reduce((a, r) => a + (r[i] || '').length, 0);
+        if (score > bestScore) { bestScore = score; best = i; }
+      });
+      sel.value = best;
+      $('colWrap').hidden = false;
+      loadColumn();
+    };
+    rd.readAsText(file);
+  });
+  $('colSel').addEventListener('change', loadColumn);
+
   $('clearBtn').addEventListener('click', () => {
     $('input').value = ''; $('output').value = ''; $('pages').innerHTML = '';
-    $('pdfBtn').disabled = true; say(''); $('pdfStatus').textContent = '';
+    say(''); $('pdfStatus').textContent = '';
   });
 
   $('copyBtn').addEventListener('click', async () => {
     const ta = $('output');
     if (!ta.value) { say('Nothing to copy yet.'); return; }
-    try { await navigator.clipboard.writeText(ta.value); }
-    catch (e) { ta.select(); document.execCommand('copy'); }
-    say('Copied to clipboard.');
+    const text = stripMarkers(ta.value);
+    try { await navigator.clipboard.writeText(text); }
+    catch (e) {
+      const tmp = document.createElement('textarea');
+      tmp.value = text; document.body.appendChild(tmp); tmp.select();
+      document.execCommand('copy'); tmp.remove();
+    }
+    say(text !== ta.value ? 'Copied (blank-line markers removed).' : 'Copied to clipboard.');
   });
 
   // ---- Tab / Shift+Tab in the editor ----
@@ -400,65 +532,248 @@
   });
 
   // ---- PDF preview and download ----
-  function getLines() {
-    return $('output').value.split('\n')
-      .map(l => l.replace(/\s+$/, '').replace(/\t/g, '    '))
-      .filter(l => l.trim() !== '');
+  function getPrograms() {
+    const progs = []; let cur = [];
+    $('output').value.split('\n').forEach(l => {
+      if (l.trim() === '~') { progs.push(cur); cur = []; }
+      else {
+        let s = l.replace(/\s+$/, '').replace(/\t/g, '    ');
+        const m = getMarker();
+        if (m && s.endsWith(m)) { s = s.slice(0, -m.length).replace(/\s+$/, ''); cur.push(s, ''); }  // extra blank line
+        else cur.push(s);
+      }
+    });
+    progs.push(cur);
+    return progs.map(p => {
+      while (p.length && p[0].trim() === '') p.shift();
+      while (p.length && p[p.length - 1].trim() === '') p.pop();
+      return p;
+    }).filter(p => p.length);
   }
   function pageSize() {
     return $('orient').value === 'landscape' ? { w: 792, h: 612 } : { w: 612, h: 792 };
   }
-  function fontFor(line, w) {
-    const usable = w - 72;
-    return Math.max(8, Math.min(36, usable / (0.6 * Math.max(line.length, 1))));
+  // Long lines: break at a space outside strings, indent the rest, optionally add a backslash
+  function wrapLine(line, n, backslash) {
+    if (line.includes('"' + '""') || line.includes("'" + "''")) return [line];
+    const ind = line.match(/^ */)[0], contInd = ind + '    ', out = [];
+    let cur = line, first = true;
+    for (let guard = 0; cur.length > n && guard < 50; guard++) {
+      const lim = n - (backslash ? 2 : 0), base = first ? ind.length : contInd.length;
+      let q = null, best = -1, after = -1;
+      for (let i = 0; i < cur.length; i++) {
+        const c = cur[i];
+        if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+        if (c === '"' || c === "'") { q = c; continue; }
+        if (c === '#') break;
+        if (c === ' ' && i >= base + 8 && i < cur.length - 1 && cur[i - 1] !== ' ') {
+          if (i <= lim) best = i; else if (after < 0) after = i;
+        }
+      }
+      const at = best >= 0 ? best : after;
+      if (at < 0) break;
+      out.push(cur.slice(0, at) + (backslash ? ' \\' : ''));
+      cur = contInd + cur.slice(at + 1);
+      first = false;
+    }
+    out.push(cur);
+    return out;
+  }
+  function pieces(l) {
+    const mode = $('longMode').value, n = Math.max(20, +$('maxLen').value || 60);
+    return mode === 'shrink' || l.length <= n ? [l] : wrapLine(l, n, mode === 'backslash');
+  }
+  function buildPages() {
+    const { w, h } = pageSize(), progs = getPrograms(), pages = [];
+    if ($('layout').value === 'line') {
+      const all = [];
+      progs.forEach(p => p.filter(l => l.trim() !== '').forEach(l => all.push(l)));
+      all.forEach((l, i) => {
+        const ls = pieces(l), longest = Math.max(...ls.map(x => x.length), 1);
+        pages.push({
+          lines: ls, center: true, label: (i + 1) + ' / ' + all.length,
+          fs: Math.max(8, Math.min(36, (w - 72) / (0.6 * longest), (h - 96) / (ls.length * 1.25)))
+        });
+      });
+      return pages;
+    }
+    progs.forEach((prog, pi) => {
+      const p = prog.flatMap(pieces);
+      const longest = Math.max(...p.map(l => l.length), 1), avail = h - 96;
+      let fs = Math.max(6, Math.min(14, (w - 72) / (0.6 * longest)));
+      let cap = Math.floor(avail / (fs * 1.25));
+      if (p.length > cap) {
+        fs = Math.max(7, Math.min(fs, avail / (p.length * 1.25)));
+        cap = Math.floor(avail / (fs * 1.25));
+      }
+      const parts = Math.ceil(p.length / cap);
+      for (let k = 0; k < parts; k++) {
+        pages.push({
+          lines: p.slice(k * cap, (k + 1) * cap), center: false, fs,
+          label: 'Program ' + (pi + 1) + ' of ' + progs.length + (parts > 1 ? ' (page ' + (k + 1) + '/' + parts + ')' : '')
+        });
+      }
+    });
+    return pages;
   }
 
   $('previewBtn').addEventListener('click', () => {
-    const lines = getLines(), box = $('pages'), info = $('pdfStatus');
+    const pages = buildPages(), box = $('pages'), info = $('pdfStatus');
     box.innerHTML = '';
-    if (!lines.length) { info.textContent = 'Add code in step 2 first.'; $('pdfBtn').disabled = true; return; }
+    if (!pages.length) { info.textContent = 'Add code in step 2 first.'; return; }
     const { w, h } = pageSize();
-    const cardW = 264, scale = cardW / w, cardH = h * scale;
-    lines.forEach((line, i) => {
+    const cardW = $('layout').value === 'program' ? 340 : 264, scale = cardW / w;
+    pages.forEach(pg => {
       const card = document.createElement('div');
       card.className = 'page';
-      card.style.width = cardW + 'px'; card.style.height = cardH + 'px';
+      card.style.width = cardW + 'px'; card.style.height = (h * scale) + 'px';
+      card.style.alignItems = pg.center ? 'center' : 'flex-start';
       const pre = document.createElement('pre');
-      pre.style.fontSize = (fontFor(line, w) * scale) + 'px';
+      pre.style.fontSize = (pg.fs * scale) + 'px';
+      pre.style.lineHeight = '1.25';
       pre.style.marginLeft = (36 * scale) + 'px';
-      pre.textContent = line;
+      if (!pg.center) pre.style.marginTop = (48 * scale) + 'px';
+      pre.textContent = pg.lines.join('\n');
       card.appendChild(pre);
       if ($('numbers').checked) {
         const n = document.createElement('span');
-        n.className = 'num'; n.textContent = (i + 1) + ' / ' + lines.length;
+        n.className = 'num'; n.textContent = pg.label;
         card.appendChild(n);
       }
       box.appendChild(card);
     });
-    info.textContent = lines.length + ' page' + (lines.length === 1 ? '' : 's') + ' (blank lines are skipped).';
-    $('pdfBtn').disabled = false;
+    info.textContent = pages.length + ' page' + (pages.length === 1 ? '' : 's') + '.';
   });
 
-  $('pdfBtn').addEventListener('click', () => {
-    const lines = getLines(), info = $('pdfStatus');
-    if (!lines.length) return;
-    if (!window.jspdf) { info.textContent = 'The PDF library did not load. Check your internet connection and reload.'; return; }
+  // ---- Downloads: PDF, DOCX, CSV, ZIP ----
+  const MIME_DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  const baseName = () => $('layout').value === 'program' ? 'student-programs' : 'python-lines';
+  function download(blob, name) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
+  function makePdf() {
+    const pages = buildPages();
+    if (!pages.length) return null;
+    if (!window.jspdf) throw new Error('The PDF library did not load. Check your internet connection and reload.');
     const { w, h } = pageSize();
     const doc = new window.jspdf.jsPDF({ orientation: $('orient').value, unit: 'pt', format: 'letter' });
     doc.setFont('courier', 'normal');
-    lines.forEach((line, i) => {
+    pages.forEach((pg, i) => {
       if (i > 0) doc.addPage();
-      const fs = fontFor(line, w);
-      doc.setFontSize(fs);
-      doc.text(line, 36, h / 2 + fs * 0.3);
+      doc.setFontSize(pg.fs);
+      if (pg.center) pg.lines.forEach((l, k) => doc.text(l, 36, h / 2 - (pg.lines.length - 1) * pg.fs * 0.625 + pg.fs * 0.3 + k * pg.fs * 1.25));
+      else pg.lines.forEach((l, k) => doc.text(l, 36, 48 + pg.fs + k * pg.fs * 1.25));
       if ($('numbers').checked) {
         doc.setFontSize(10);
-        doc.text((i + 1) + ' / ' + lines.length, w - 36, h - 24, { align: 'right' });
+        doc.text(pg.label, w - 36, h - 24, { align: 'right' });
       }
     });
-    doc.save('python-lines.pdf');
-    info.textContent = 'PDF downloaded.';
-  });
+    return doc;
+  }
+
+  // Programs as plain code: markers removed, one array of lines per program
+  function codePrograms() {
+    const progs = []; let cur = [];
+    stripMarkers($('output').value).split('\n').forEach(l => {
+      if (l.trim() === '~') { progs.push(cur); cur = []; }
+      else cur.push(l.replace(/\s+$/, ''));
+    });
+    progs.push(cur);
+    return progs.map(p => {
+      while (p.length && p[0].trim() === '') p.shift();
+      while (p.length && p[p.length - 1].trim() === '') p.pop();
+      return p;
+    }).filter(p => p.length);
+  }
+
+  // One program per row. Line breaks and indentation stay inside the cell.
+  function makeCsv() {
+    const progs = codePrograms();
+    if (!progs.length) return null;
+    const q = s => '"' + s.replace(/"/g, '""') + '"';
+    return '\uFEFFProgram\r\n' + progs.map(p => q(p.join('\n'))).join('\r\n') + '\r\n';
+  }
+
+  // Builds the .docx by hand: one page per entry from buildPages(), Courier New
+  async function makeDocx() {
+    const pages = buildPages();
+    if (!pages.length) return null;
+    if (!window.JSZip) throw new Error('The ZIP library did not load. Check your internet connection and reload.');
+    const { w, h } = pageSize(), land = $('orient').value === 'landscape', numbers = $('numbers').checked;
+    const tw = pt => Math.round(pt * 20);
+    const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    const font = '<w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/>';
+    const sect = i => '<w:sectPr>' + (numbers ? '<w:footerReference w:type="default" r:id="rIdF' + i + '"/>' : '')
+      + '<w:pgSz w:w="' + tw(w) + '" w:h="' + tw(h) + '"' + (land ? ' w:orient="landscape"' : '') + '/>'
+      + '<w:pgMar w:top="960" w:right="720" w:bottom="960" w:left="720" w:header="480" w:footer="480" w:gutter="0"/></w:sectPr>';
+
+    let body = '';
+    pages.forEach((pg, i) => {
+      const lh = tw(pg.fs * 1.25), sz = Math.max(2, Math.round(pg.fs * 2));
+      const before = pg.center ? Math.max(0, tw((h - pg.lines.length * pg.fs * 1.25) / 2 - 48)) : 0;
+      pg.lines.forEach((line, k) => {
+        const endsPage = k === pg.lines.length - 1 && i < pages.length - 1;
+        body += '<w:p><w:pPr><w:spacing w:before="' + (k === 0 ? before : 0) + '" w:after="0" w:line="' + lh + '" w:lineRule="exact"/>'
+          + (endsPage ? sect(i) : '') + '</w:pPr>'
+          + (line === '' ? '' : '<w:r><w:rPr>' + font + '<w:sz w:val="' + sz + '"/></w:rPr><w:t xml:space="preserve">' + esc(line) + '</w:t></w:r>')
+          + '</w:p>';
+      });
+    });
+    const documentXml = XML + '<w:document ' + NS + '><w:body>' + body + sect(pages.length - 1) + '</w:body></w:document>';
+
+    const zip = new window.JSZip();
+    let types = '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>';
+    let rels = '';
+    if (numbers) {
+      pages.forEach((pg, i) => {
+        zip.file('word/footer' + i + '.xml', XML + '<w:ftr ' + NS + '><w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:rPr>' + font
+          + '<w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">' + esc(pg.label) + '</w:t></w:r></w:p></w:ftr>');
+        types += '<Override PartName="/word/footer' + i + '.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>';
+        rels += '<Relationship Id="rIdF' + i + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer' + i + '.xml"/>';
+      });
+    }
+    zip.file('[Content_Types].xml', XML + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' + types + '</Types>');
+    zip.file('_rels/.rels', XML + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+    zip.file('word/_rels/document.xml.rels', XML + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rels + '</Relationships>');
+    zip.file('word/document.xml', documentXml);
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  const info = () => $('pdfStatus');
+  function empty() { info().textContent = 'Add code in step 2 first.'; }
+  async function run(label, fn) {
+    try { info().textContent = ''; if (await fn() === false) empty(); else info().textContent = label + ' downloaded.'; }
+    catch (e) { info().textContent = e.message; }
+  }
+
+  $('pdfBtn').addEventListener('click', () => run('PDF', () => {
+    const doc = makePdf(); if (!doc) return false;
+    download(doc.output('blob'), baseName() + '.pdf');
+  }));
+  $('docxBtn').addEventListener('click', () => run('DOCX', async () => {
+    const data = await makeDocx(); if (!data) return false;
+    download(new Blob([data], { type: MIME_DOCX }), baseName() + '.docx');
+  }));
+  $('csvBtn').addEventListener('click', () => run('CSV', () => {
+    const csv = makeCsv(); if (!csv) return false;
+    download(new Blob([csv], { type: 'text/csv;charset=utf-8' }), baseName() + '.csv');
+  }));
+  $('zipBtn').addEventListener('click', () => run('ZIP', async () => {
+    const pdf = makePdf(), docx = await makeDocx(), csv = makeCsv();
+    if (!pdf || !docx || !csv) return false;
+    const zip = new window.JSZip(), base = baseName();
+    zip.file(base + '.pdf', pdf.output('arraybuffer'));
+    zip.file(base + '.docx', docx);
+    zip.file(base + '.csv', csv);
+    download(await zip.generateAsync({ type: 'blob' }), base + '.zip');
+  }));
 })();
 </script>
 </body>
